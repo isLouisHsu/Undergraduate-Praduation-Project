@@ -1,0 +1,283 @@
+#include "mainwindow.h"
+#include "ui_mainwindow.h"
+#include <QDateTime>
+
+MainWindow::MainWindow(QWidget *parent) :
+    QMainWindow(parent),
+    ui(new Ui::MainWindow)
+{
+    ui->setupUi(this);
+
+    InitParams();
+    InitRemap();
+    InitUI();
+}
+
+MainWindow::~MainWindow()
+{
+    if (serial.isOpen())
+        serial.close();
+    if (Capture.isOpened())
+    {
+        timer->stop();
+        Capture.release();
+    }
+
+    delete timer;
+    delete ui;
+}
+
+/* 初始化全局参数 */
+void MainWindow::InitParams()
+{
+    timer = new QTimer(this);
+    connect(timer, SIGNAL(timeout()), this, SLOT(GetFrame()));
+
+    Frame = FrameGray = FrameBinary = NULL;
+    PtBeacon = PtCarMid = PtCarFront = LastPtCarMid = Point2f(-1, -1);
+
+    ControlFlag = 0;
+    //0:车未起跑，1:车已起跑
+    CarMovedFlag=0;
+
+    TurnDistance = DEFAULT_TURN_DISTANCE;
+    LastDistCar2Beacon=0;
+
+    for(char i = 0;i < 20;i++)
+    {
+        if(i%4==0) Direction[i]=0;
+        else Direction[i] = 1;
+    }
+
+    BlurSize = 2;
+    ThreVal = 50;
+    ThreMax = 255;
+    MinBlobArea=1;
+
+    BeaconCount=0;
+    LastBeaconCount=0;
+    CarStopCount = 0;
+    CarGoBackCount = 0;
+
+    //0：右转 1：左转
+    DirAngle = 0;
+    //0：前进 1：后退
+    DirSpeed = GO_FORWARD;
+    Angle = 0;
+    Speed = GO_FORWARD_SPEED;
+
+    Distance = 0;
+}
+
+/* 初始化界面显示 */
+void MainWindow::InitUI()
+{
+#ifdef SHOW_UI
+    ui->lineEdit_ThreVal->setText(QString(QString::number(ThreVal, 10)));
+    ui->lineEdit_BlurSize->setText(QString(QString::number(BlurSize, 10)));
+    ui->lineEdit_TurnDistance->setText(QString::number(TurnDistance, 10));
+    ui->lineEdit_AreaMin->setText(QString("%1").arg(MinBlobArea));
+    ui->lineEdit_Angle->setText(QString::number(Angle,10));
+    ui->lineEdit_DirAngle->setText(QString::number(DirAngle,10));
+    ui->lineEdit_Speed->setText(QString::number(Speed,10));
+    ui->lineEdit_DirSpeed->setText(QString::number(DirSpeed,10));
+#endif
+}
+
+void MainWindow::InitRemap()
+{
+    Size imgSize = Size(CAPTURE_WIDTH,CAPTURE_HEIGHT);
+
+    cameraMatrix = Mat::eye(3, 3, CV_64F);
+    cameraMatrix.at<double>(0, 0) = 8.509557128813029e+02;
+    cameraMatrix.at<double>(0, 1) = -0.484181956501655;
+    cameraMatrix.at<double>(0, 2) = 5.012557865387501e+02;
+    cameraMatrix.at<double>(1, 1) = 8.506260738473462e+02;
+    cameraMatrix.at<double>(1, 2) = 3,670414463118832e+02;
+
+    distCoeffs = Mat::zeros(5, 1, CV_64F);
+    distCoeffs.at<double>(0, 0) = -0.426438309943381;
+    distCoeffs.at<double>(1, 0) =  0.196728107962076;
+    distCoeffs.at<double>(2, 0) =  4.795447746219946e-04;
+    distCoeffs.at<double>(3, 0) = -0.001192423717939;
+    distCoeffs.at<double>(4, 0) =  0;
+
+    initUndistortRectifyMap(cameraMatrix, distCoeffs, Mat(),
+         getOptimalNewCameraMatrix(cameraMatrix, distCoeffs, imgSize, 1, imgSize, 0),
+         imgSize, CV_16SC2, map1, map2);
+}
+
+void MainWindow::on_pushButton_Calibrate_clicked()
+{
+    CameraCalibrate Cc;
+    vector<string> fileList;
+    string fileFolder = "/home/pi/picture";
+    string fileName = "chessboard";
+    int    fileCount = 10;
+    Size boardSize(9, 6);
+
+    for (int i = 0; i <= fileCount; i++)
+    {
+        stringstream s;
+        s << fileFolder << '/' << fileName << setw(2) << setfill('0') << i << ".jpg";
+        cout << s.str() << endl;
+
+        fileList.push_back(s.str());
+        //Mat image = imread(s.str(),0);
+        //imshow("Image", image);
+        //waitKey(100);
+
+        Cc.addChessboardPoints(fileList, boardSize);
+        Cc.calibrate();
+    }
+
+#if 1
+        //保存参数
+        FileStorage camerMatirxFS("/home/pi/camerMatirx.xml", 1);
+        FileStorage disCoeffsFS("/home/pi/disCoeffs.xml", 1);
+        Mat camerMatirx = Cc.getCameraMatrix();
+        Mat disCoeffs = Cc.getDistCoeffs();
+        camerMatirxFS << "camerMatirx" << camerMatirx;
+        disCoeffsFS << "disCoeffs" << disCoeffs;
+        camerMatirxFS.release();
+        disCoeffsFS.release();
+#endif
+}
+
+/* 捕获照片 */
+void MainWindow::on_pushButton_TakePhoto_clicked()
+{
+    static int fileCnt=0;
+    std::string fileFolder = "/home/pi/picture";
+    std::string fileName = "chessboard";
+
+    Capture >> Frame;
+
+    stringstream s;
+    s << fileFolder << '/' << fileName << setw(2) << setfill('0') << fileCnt++ << ".jpg";
+
+    imwrite(s.str(), Frame);
+}
+
+/* 打开摄像头按钮 */
+void MainWindow::on_pushButton_OpenCam_clicked()
+{
+    OpenCamera();
+}
+
+
+/* 从界面获取阈值 */
+void MainWindow::on_lineEdit_ThreVal_textChanged(const QString &arg1)
+{
+    ThreVal = arg1.toInt();
+}
+
+/* 从界面获取滤波块大小 */
+void MainWindow::on_lineEdit_BlurSize_textChanged(const QString &arg1)
+{
+    BlurSize = arg1.toInt();
+}
+
+/* 从界面获取速度 */
+void MainWindow::on_lineEdit_Speed_textChanged(const QString &arg1)
+{
+    Speed = arg1.toUShort();
+}
+
+/* 从界面获取Blob过滤面积大小 */
+void MainWindow::on_lineEdit_AreaMin_textChanged(const QString &arg1)
+{
+    MinBlobArea = arg1.toFloat();
+}
+
+/* 从界面获取转弯时距信标灯距离 */
+void MainWindow::on_lineEdit_TurnDistance_textChanged(const QString &arg1)
+{
+    TurnDistance = arg1.toUShort();
+}
+
+/* 停车按钮 */
+void MainWindow::on_pushButton_Stop_clicked()
+{
+    StopCar();
+}
+
+/* 手动控制按钮 */
+void MainWindow::on_pushButton_Control_clicked()
+{
+    ushort  uiDirAngle = ui->lineEdit_DirAngle->text().toUShort() & 0x00ff;
+    ushort  uiAngle = ui->lineEdit_Angle->text().toUShort() & 0x00ff;
+    ushort  uiDirSpeed = ui->lineEdit_DirSpeed->text().toUShort() & 0x00ff;
+    ushort uiSpeed = ui->lineEdit_Speed->text().toUShort();
+
+    SendControlData(uiDirAngle,uiAngle,0,uiDirSpeed,uiSpeed);
+}
+
+/* 打开串口按钮 */
+void MainWindow::on_pushButton_OpenPort_clicked()
+{
+    OpenSerialPort();
+}
+
+/* 读串口数据 */
+void MainWindow::ReadCom()
+{
+    QByteArray temp = serial.readAll();
+    if (!temp.isEmpty())
+    {
+        //TODO:
+    }
+}
+
+/* 打开串口 */
+void MainWindow::OpenSerialPort()
+{
+    if(!serial.isOpen())
+    {
+        InitSerialPort();
+        serial.close();
+
+        if(serial.open(QIODevice::ReadWrite))
+        {
+            connect(&serial,SIGNAL(readyRead()),this,SLOT(ReadCom()));
+            if(serial.isOpen())
+            {
+                ui->pushButton_OpenPort->setText("Close");
+                ui->comboBox_SerialPort->setDisabled(true);
+            }
+        }
+    }
+    else
+    {
+        serial.close();
+        ui->pushButton_OpenPort->setText("Open");
+        ui->comboBox_SerialPort->setDisabled(false);
+    }
+}
+
+/* 打开摄像头 */
+void MainWindow::OpenCamera()
+{
+    if (!Capture.isOpened())
+    {
+        Capture.open(CAMERA_PATH);
+        //Capture.open("/media/pi/HP/PRJ0/WIN_20170502_15_49_37_Pro.mp4");
+        Capture.set(CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH);
+        Capture.set(CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT);
+        //Capture.set(CAP_PROP_FPS,30.0);
+
+        if (Capture.isOpened())
+        {
+            timer->start(1000 / 30);
+            ui->pushButton_OpenCam->setText("CloseCam");
+            //qDebug("%f", Capture.get(CAP_PROP_FPS));
+        }
+    }
+    else
+    {
+        timer->stop();
+        Capture.release();
+        ui->pushButton_OpenCam->setText("OpenCam");
+    }
+}
+

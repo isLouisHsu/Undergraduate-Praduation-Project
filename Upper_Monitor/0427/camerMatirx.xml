@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<opencv_storage>
+<camerMatirx type_id="opencv-matrix">
+  <rows>3</rows>
+  <cols>3</cols>
+  <dt>d</dt>
+  <data>
+    1.4781099496910656e+02 0. 1.5779541221072091e+02 0.
+    1.9636467680993724e+02 1.1577775370416798e+02 0. 0. 1.</data></camerMatirx>
+</opencv_storage>
